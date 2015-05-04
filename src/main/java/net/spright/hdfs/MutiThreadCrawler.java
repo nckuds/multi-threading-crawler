@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.jsoup.HttpStatusException;
@@ -31,9 +32,9 @@ public class MutiThreadCrawler {
         final int downloadThreadCount = 10;
         final int htmlThreadCount = 10;
         final int flushThreadCount = 10;
-        final int urlCount = 500;
-        final int htmlCount = 300;
-        final int resultCount = 300;
+        final int urlCount = 10000;
+        final int htmlCount = 1000;
+        final int resultCount = 1000;
         final FileSystem fs = getFileSystem();
         
         ExecutorService service = Executors.newFixedThreadPool(
@@ -56,8 +57,8 @@ public class MutiThreadCrawler {
             service.execute(new HtmlResultFlusher(fs, resultQueue));
         }
         service.shutdown();
-        waitSomething(Integer.parseInt(args[1]));
-        service.shutdownNow();
+        //waitSomething(Integer.parseInt(args[1]));
+        //service.shutdownNow();
         service.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
         System.exit(0);
     }
@@ -83,33 +84,53 @@ public class MutiThreadCrawler {
                     //TODO
                     while (urlQueue.isEmpty()) {
                         if (urlQueue.isEmpty() && htmlQueue.isEmpty()){
-                         break;
-                     }
+                            break;
+                        }
+                       
                     } // waiting
                     
                     
-                    String url = urlQueue.take();   
+                    String url = urlQueue.take();  
+                    if (urlList.size() > 1000000) {
+                        urlList.clear();
+                    }
+                    //System.out.println(urlQueue.size());
                     if (!urlList.contains(url)) {
                         try {      
                             urlList.add(url);
-                            Document doc = Jsoup.connect(url).get();  
-                            Elements meta = doc.select("html head meta");
-                            if (meta.attr("http-equiv").contains("REFRESH")) {
-                                doc = Jsoup.connect(meta.attr("content").split("=")[1]).get();
+                            Document doc = null;  
+                            Elements meta  = null;
+                            try {
+                                doc = Jsoup.connect(url).get();
+                            } catch (IOException  ex) {
+                                //Logger.getLogger(MutiThreadCrawler.class.getName()).log(Level.SEVERE, null, ex);
+                            }
+                           
+                            if (doc == null) {
+                                continue;
+                            }
+                            meta = doc.select("html head meta");
+                            
+                            if (meta != null && meta.attr("http-equiv").contains("REFRESH")) {
+                                try {
+                                    doc = Jsoup.connect(meta.attr("content").split("=")[1]).get();
+                                } catch (IOException ex) {
+                                    //Logger.getLogger(MutiThreadCrawler.class.getName()).log(Level.SEVERE, null, ex);
+                                }
+                            }
+                            
+                            if (doc != null && htmlQueue.size() < 999) {
+                                htmlQueue.put(doc);
                             }
                             //System.out.println(doc.title());
-                            htmlQueue.put(doc);
-                            
                         }
-                        catch (IllegalArgumentException | HttpStatusException e) {
+                        catch (IllegalArgumentException e) {
                           //System.out.println("url is not vaild");
                           //System.out.println(url);
                         } 
                     }
-                    
-                    
                 }
-            } catch (InterruptedException | IOException e) {
+            } catch (InterruptedException e) {
                 //System.out.println("urlQueue interrupted");
                 Thread.currentThread().interrupt(); 
             }
@@ -133,18 +154,27 @@ public class MutiThreadCrawler {
                         if (urlQueue.isEmpty() && htmlQueue.isEmpty()) {
                             break;
                         }
+                        //System.out.println("html empty");
                     } // waiting
                     
+                    
                     Document doc = htmlQueue.take();
-                    System.out.println(doc.title());
+                    //System.out.println(doc.title());
                     if (!doc.title().isEmpty()) {
                      
                         HtmlResult htmlResult = new HtmlResult(doc.location(), doc.title(), doc.outerHtml());
                         Elements links = doc.select("a[href]");
-                        resultQueue.put(htmlResult);
-                        for(Element link : links) {
-                            urlQueue.put(link.attr("abs:href"));
-                            //System.out.println(doc.title());
+                        
+                        if (resultQueue.size() < 999) {
+                            //System.out.println(htmlResult.title);
+                            resultQueue.put(htmlResult);
+                        }
+                        
+                        for(Element link : links) {    
+                            if (urlQueue.size() < 9999) {
+                                urlQueue.put(link.attr("abs:href"));
+                            }
+
                         }
                     }
                 }
@@ -172,39 +202,72 @@ public class MutiThreadCrawler {
 
             try {
                 while (!Thread.interrupted()) {
-
-                    //while (resultQueue.isEmpty()) {} // waiting
+                    //System.out.println(resultQueue.size());
+                    //while (resultQueue.isEmpty()) {
+                       //  System.out.println("empty");
+                    //} // waiting
+                    if (resultQueue.isEmpty()) {
+                        continue;
+                    }
                     Date date = new Date();
                     HtmlResult htmlResult = resultQueue.take();
-                    System.out.println("title: " + htmlResult.title);
-                    System.out.println("link: " + htmlResult.link + "\n");
-                    outputHtml(fs, htmlResult,  "page_" + htmlResult.title 
-                        + dateFormat.format(date));
+                    System.out.println("doc take");
+                    if (htmlResult.title != null) {
+                    
+                        System.out.println("title: " + htmlResult.title);
+                        System.out.println("link: " + htmlResult.link + "\n");
+                        outputHtml(fs, htmlResult,  "page_" + htmlResult.title 
+                            + dateFormat.format(date));
+                    }
                     
                 }
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt(); 
-            } catch (IOException ex) {
-                Logger.getLogger(MutiThreadCrawler.class.getName()).log(Level.SEVERE, null, ex);
-            }
+            } 
         }
     }
 
     public static void outputHtml(FileSystem fs, HtmlResult htmlResult,
-        String outputPath) throws IOException  {
+        String outputPath)  {
         
         Path path;
-        path = new Path(outputPath);
-        if (fs.exists(path)) {
+        try {
+            path = new Path(outputPath);
+        }
+        catch (IllegalArgumentException e){
             return;
         }
-        BufferedWriter writer = new BufferedWriter(
-            new OutputStreamWriter(
-                fs.create(path) 
-                , Charset.forName("UTF-8")));
-        writer.write(htmlResult.link + "\n");
-        writer.write(htmlResult.title + "\n");
-        writer.write(htmlResult.content);
+        FSDataOutputStream newPath = null;
+        BufferedWriter writer = null;
+        
+        try {
+            if (fs.exists(path)) {
+                return;
+            }
+            else {
+                newPath = fs.create(path);
+            }
+        } catch (IOException ex) {
+           //Logger.getLogger(MutiThreadCrawler.class.getName()).log(Level.SEVERE, null, ex);
+            return;
+        }
+        if (newPath == null) {
+            return;
+        }
+        writer = new BufferedWriter(
+                new OutputStreamWriter(
+                        newPath
+                        , Charset.forName("UTF-8")));
+        try {
+            if (writer != null) {
+                writer.write(htmlResult.link + "\n");
+                writer.write(htmlResult.title + "\n");
+                writer.write(htmlResult.content);
+            }
+        } catch (IOException ex) {
+            //Logger.getLogger(MutiThreadCrawler.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        
     }
     
     private static FileSystem getFileSystem() throws IOException {
